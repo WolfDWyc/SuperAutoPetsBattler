@@ -1,13 +1,17 @@
 from pet import Pet
 
-TEAM_SIZE = 5
 
 class Team:
     """Represents a team of pets in super auto pets."""
+    TEAM_SIZE = 5
 
-    def __init__(self):
-        self.pets = []
-        self.buffs = []
+    def __init__(self, pets=None, buffs=None):
+        self.pets = pets
+        if pets is None:
+            self.pets = []
+        self.buffs = buffs
+        if buffs is None:
+            self.buffs = []
 
     def can_add_pet(self):
         """Returns True if the team has room for another pet."""
@@ -16,7 +20,7 @@ class Team:
         for pet in self.pets:
             if pet.health > 0:
                 pets_alive += 1
-        return pets_alive < TEAM_SIZE
+        return pets_alive < self.TEAM_SIZE
 
     def add_pet(self, pet, index=-1):
         """Add a pet to the team."""
@@ -28,6 +32,7 @@ class Team:
             return True
         else:
             return False
+
 
     def remove_pet(self, pet: Pet | int):
         """Remove a pet from the team."""
@@ -49,7 +54,11 @@ class Team:
 
     def clone(self):
         """Returns a copy of the team."""
-        new_team = Team()
+        new_team = Team(buffs=self.buffs[:])
         for pet in self.pets:
-            new_team.add_pet(pet.clone())
+            pet_clone = pet.clone()
+            pet_clone.team = new_team
+            new_team.add_pet(pet_clone)
         return new_team
+
+

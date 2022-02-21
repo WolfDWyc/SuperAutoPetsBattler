@@ -17,97 +17,172 @@ class BattleResult(Enum):
 class BattleTurn:
     """Represents a super auto pets turn of a battle between 2 teams."""
 
-
+    # Rework battle turn to not depend on game, possible GameMetadata/GameData/Metadata class?
     def __init__(self, team_1: Team, team_2: Team, game=None):
         self.team_1 = team_1.clone()
         self.team_2 = team_2.clone()
         self.original_teams = {self.team_1: team_1, self.team_2: team_2}
         self.game = game
+        self.event_data = {"pet_types": self.game.pet_types, "food_types": self.game.food_types, "status_types": self.game.status_types,
+                            "turn_type": "battle", "turn": self, "team_1": self.team_1, "team_2": self.team_2}
+
 
     def play(self, log=True) -> BattleResult:
         """Play the battle and return the result."""
         if log:
             team_strings = [str(self.team_1), str(self.team_2)]
-            logging.debug(concat_strings_horizontally(team_strings, "|"))
+            # logging.debug(concat_strings_horizontally(team_strings, "|"))
 
         self.queued_attacks = {self.team_1: [], self.team_2: []}
+
+        team_1_data = {"team": self.team_1, "original_team": self.original_teams[self.team_1], "enemy_team": self.team_2} | self.event_data
+        team_2_data = {"team": self.team_2, "original_team": self.original_teams[self.team_2], "enemy_team": self.team_1} | self.event_data
+        self.trigger_event("StartOfBattle", team_1_data | self.event_data)
+        self.trigger_event("StartOfBattle", team_2_data | self.event_data)
+
         while True:
             if len(self.team_1.pets) == 0 and len(self.team_2.pets) == 0:
-                return BattleResult.DRAW
+                battle_result = BattleResult.DRAW
+                break
             elif len(self.team_1.pets) == 0:
-                return BattleResult.TEAM_2_WIN
+                battle_result = BattleResult.TEAM_2_WIN
+                break
             elif len(self.team_2.pets) == 0:
-                return BattleResult.TEAM_1_WIN
+                battle_result = BattleResult.TEAM_1_WIN
+                break
 
             self.play_next_attack()
 
             if log:
                 team_strings = [str(self.team_1), str(self.team_2)]
-                logging.debug(concat_strings_horizontally(team_strings, "|"))
+                # logging.debug(concat_strings_horizontally(team_strings, "|"))
 
+        for original_team in self.original_teams.values():
+            for pet in original_team.pets:
+                pet.trigger_end_of_battle()
+        return battle_result
 
     def play_next_attack(self):
         team_1_pet = self.team_1.pets[-1]
         team_2_pet = self.team_2.pets[-1]
-        self.queue_attack(self.team_1, Attack(team_1_pet, [team_2_pet], team_1_pet.attack))
-        self.queue_attack(self.team_2, Attack(team_2_pet, [team_1_pet], team_2_pet.attack))
+
+        self.play_attack(
+            Attack(team_1_pet, self.team_1, [team_2_pet], team_1_pet.attack),
+            Attack(team_2_pet, self.team_2, [team_1_pet], team_2_pet.attack)
+        )
 
         while self.queued_attacks[self.team_1] or self.queued_attacks[self.team_2]:
             if self.queued_attacks[self.team_1]:
-                attack: Attack = self.queued_attacks[self.team_1].pop(0)
-                self.play_attack(self.team_1, attack)
-            logging.debug("")
+                attack = self.queued_attacks[self.team_1].pop(0)
+                self.play_attack(attack, None)
             if self.queued_attacks[self.team_2]:
-                attack: Attack = self.queued_attacks[self.team_2].pop(0)
-                self.play_attack(self.team_2, attack)
+                attack = self.queued_attacks[self.team_2].pop(0)
+                self.play_attack(None, attack)
 
-    def queue_attack(self, team, attack, play_now=False):
+    def queue_attack(self, attack, play_now=False):
         """Queue an attack."""
+        team = attack.attacker_team
         if play_now:
-            self.play_attack(team, attack)
+            if team == self.team_1:
+                self.play_attack(attack, None)
+            else:
+                self.play_attack(None, attack)
         else:
             self.queued_attacks[team].append(attack)
 
-    def play_attack(self, team, attack):
-        """Play an attack on the enemy team."""
-        event_data = {"pet_types": self.game.pet_types, "turn_type": "battle", "turn": self}
-        enemy_team = self.enemy_team(team)
-        team_data = {"team": team, "original_team": self.original_teams[team], "enemy_team": enemy_team} | event_data
-        trigger_own_events = attack.trigger_own_events
+    def get_pet_team(self, pet):
+        """Return the team that the pet belongs to."""
+        if pet in self.team_1.pets:
+            return self.team_1
+        else:
+            return self.team_2
 
-        self.trigger_event("BeforeAttack", {"pet": attack.attacker} | team_data, trigger_own_events)
-        # If BeforeAttack ability killed all targets, skip the attack
-        if all(target.health <= 0 for target in attack.targets):
+    def play_attack(self, team_1_attack: Attack, team_2_attack: Attack):
+        """Play a double-sided or single-sided attack"""
+        team_1_data = {"team": self.team_1, "original_team": self.original_teams[self.team_1], "team_pets_snapshot": self.team_1.pets[:], "enemy_team": self.team_2} | self.event_data
+        team_2_data = {"team": self.team_2, "original_team": self.original_teams[self.team_2], "team_pets_snapshot": self.team_2.pets[:], "enemy_team": self.team_1} | self.event_data
+        team_data_dicts = {self.team_1: team_1_data, self.team_2: team_2_data}
+
+        # Before the attack
+        skip_attack = False
+        if team_1_attack and team_1_attack.is_main_attack:
+            self.trigger_event("BeforeAttack", {"pet": team_1_attack.attacker} | team_1_data, team_1_attack.is_main_attack)
+            if all(target.health <= 0 for target in team_1_attack.targets):
+                skip_attack = True
+
+        if team_2_attack and team_2_attack.is_main_attack:
+            self.trigger_event("BeforeAttack", {"pet": team_2_attack.attacker} | team_2_data, team_2_attack.is_main_attack)
+            if all(target.health <= 0 for target in team_2_attack.targets):
+                skip_attack = True
+
+        # If a BeforeAttack ability killed all targets, skip the attack
+        if skip_attack:
             return
 
-        for target in attack.targets:
-            if target not in team.pets and target not in enemy_team.pets:
-                continue
-            if target in team.pets:
-                target_team = team
-                target_team_data = {"team": target_team, "original_team": self.original_teams[target_team], "enemy_team": enemy_team} | event_data
-            elif target in enemy_team.pets: # Redundant elif instead of else, but more readable
-                target_team = enemy_team
-                target_team_data = {"team": target_team, "original_team": self.original_teams[target_team], "enemy_team": team} | event_data
+        # Get attack targets
+        team_1_targets = []
+        team_2_targets = []
+        if team_1_attack:
+            team_1_targets = team_1_attack.targets
+        if team_2_attack:
+            team_2_targets = team_2_attack.targets
+        if len(team_1_targets) != len(team_2_targets):
+            most_targets = max(len(team_1_targets), len(team_2_targets))
+            least_targets_list = min((team_1_targets, team_2_targets), key=len)
+            least_targets_list += [None] * (most_targets - len(least_targets_list))
 
-            target.health -= attack.damage
-            if target.health <= 0:
-                self.trigger_event("Faint", {"pet": target} | target_team_data, trigger_own_events)
+        # Play the attack
+        for team_1_target, team_2_target in zip(team_1_targets, team_2_targets):
+            cast_team_1_attack = (team_1_target and (team_1_target in self.team_1.pets or team_1_target in self.team_2.pets))
+            cast_team_2_attack = (team_2_target and (team_2_target in self.team_1.pets or team_2_target in self.team_2.pets))
+            team_1_target_team = team_1_target.team if cast_team_1_attack else None
+            team_2_target_team = team_2_target.team if cast_team_2_attack else None
 
-                target_team.pets.remove(target)
-                self.trigger_event("Knockout", {"pet": attack.attacker} | team_data, trigger_own_events)
-            else:
-                self.trigger_event("Hurt", {"pet": target} | target_team_data)
-        self.trigger_event("AfterAttack", {"pet": attack.attacker} | team_data, trigger_own_events)
+            if cast_team_1_attack:
+                team_1_attack_damage = team_1_attack.attacker.attack_pet(team_1_target, team_1_attack.damage, team_1_attack.is_main_attack)
+            if cast_team_2_attack:
+                team_2_attack_damage = team_2_attack.attacker.attack_pet(team_2_target, team_2_attack.damage, team_2_attack.is_main_attack)
+                
+            if cast_team_1_attack and team_1_attack_damage:
+                if team_1_target.health <= 0:
+                    event_type = "Faint"
+                else:
+                    event_type = "Hurt"
+                self.trigger_event(event_type, {"pet": team_1_target} | team_data_dicts[team_1_target_team])
 
-    def trigger_event(self, event_type, event_data, trigger_own_events=True):
-        """Called when a pet in the team triggers an event."""
-        triggering_pet = event_data["pet"]
+            if cast_team_2_attack and team_2_attack_damage:
+                if team_2_target.health <= 0:
+                    event_type = "Faint"
+                else:
+                    event_type = "Hurt"
+                self.trigger_event(event_type, {"pet": team_2_target} | team_data_dicts[team_2_target_team])
+
+            if cast_team_1_attack and team_1_target.health <= 0:
+                team_1_target_team.pets.remove(team_1_target)
+                self.trigger_event("KnockOut", {"pet": team_1_attack.attacker} | team_1_data, team_1_attack.is_main_attack)
+            if cast_team_2_attack and team_2_target.health <= 0:
+                team_2_target_team.pets.remove(team_2_target)
+                self.trigger_event("KnockOut", {"pet": team_2_attack.attacker} | team_2_data, team_2_attack.is_main_attack)
+
+        # After the attack
+        if team_1_attack and team_1_attack.is_main_attack:
+            self.trigger_event("AfterAttack", {"pet": team_1_attack.attacker} | team_1_data, team_1_attack.is_main_attack)
+        if team_2_attack and team_2_attack.is_main_attack:
+            self.trigger_event("AfterAttack", {"pet": team_2_attack.attacker} | team_2_data, team_2_attack.is_main_attack)
+
+    def trigger_event(self, event_type, event_data, include_self=True):
+        """
+        Called when a pet in the team triggers an event.
+        """
+        triggering_pet = event_data.get("pet")
         team = event_data["team"]
         for pet in team.pets:
-            if not trigger_own_events and pet == triggering_pet:
+            if not include_self and pet and pet == triggering_pet:
                 continue
-            pet.trigger_event(event_type, event_data)
+            if (pet.pet_type.id in self.game.triggers[event_type] or
+                    (pet.status and pet.status.id in self.game.triggers[event_type])):
+                pet.trigger_event(event_type, event_data)
+
 
     def enemy_team(self, team):
         """Return the other team."""
